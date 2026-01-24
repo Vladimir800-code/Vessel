@@ -439,16 +439,95 @@
     .chart-controls {
       margin-bottom: 20px;
     }
-  </style>
+
+    /* Layout tuning: widen left parameters panel so "Fix + select + value" can fit on one line */
+    .params-panel{
+      flex: 1.35;
+      min-width: 420px;
+    }
+    .panel.wide-panel{
+      flex: 1.65;
+      padding-left: 16px;
+      padding-right: 16px;
+    }
+    /* Use a bit less horizontal air inside charts (height unchanged) */
+    .panel.wide-panel .chart-container{
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    /* Fix/Lock checkbox for parameters */
+    .param-fix{
+      width: 54px;
+      text-align: center;
+      flex: 0 0 54px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .param-fix input[type="checkbox"]{
+      width: 18px;
+      height: 18px;
+      accent-color: #3498db;
+      cursor: pointer;
+    }
+    .param-fix .fix-label{
+      font-size: 12px;
+      color: #7f8c8d;
+      user-select: none;
+    }
+    .param-fixed{
+      opacity: 0.55;
+    }
+    .param-fixed .param-fix input[type="checkbox"]{
+      accent-color: #7f8c8d;
+    }
+
+  
+    .inverse-select{
+      width: 100%;
+      padding: 6px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+      font-size: 0.9em;
+    }
+    .inverse-select:disabled{
+      background: #f2f3f5;
+      color: #7f8c8d;
+    }
+    .inv-unit{
+      width: 30px;
+      margin-left: 5px;
+      color: #7f8c8d;
+      text-align: left;
+    }
+
+/* Mode switch */
+.mode-btn.active{
+  background:#2ecc71;
+}
+.mode-btn{
+  padding:6px 10px;
+  font-size:0.9em;
+}
+
+</style>
 </head>
 <body>
   <h1>Vessel Constructor — simulation model + 3D view</h1>
   
   <div class="container">
     <!-- Панель параметров -->
-    <div class="panel">
-      <h2>Vessel Parameters</h2>
-      <div id="paramsContainer"></div>
+    <div class="panel params-panel">
+      <h2 id="leftParamsTitle">Vessel Parameters</h2>
+      <div class="controls" style="margin-bottom:10px;">
+        <button id="modeDirectBtn" class="mode-btn" onclick="setWorkMode('direct')">Direct</button>
+        <button id="modeInverseBtn" class="mode-btn" onclick="setWorkMode('inverse')">Inverse</button>
+      </div>
+      <div id="directParamsWrap"><div id="paramsContainer"></div></div>
+      <div id="inverseParamsWrap" style="display:none;"></div>
     </div>
     
     <!-- Панель графика -->
@@ -473,8 +552,8 @@
       <!-- Кнопки управления под диаграммой -->
       <div class="controls-below-chart">
         <h3>Model Controls</h3>
-        <div class="controls chart-controls">
-          <select id="ontologySelect" onchange="changeOntologyMode()">
+        <div class="controls chart-controls" id="directControls">
+<select id="ontologySelect" onchange="changeOntologyMode()">
             <option value="all">All vessels</option>
             <option value="vase">Vase</option>
             <option value="dish">Dish</option>
@@ -486,6 +565,12 @@
           <button onclick="clearAll()">🗑️ Clear all</button>
           <button onclick="toggleDebug()">🐛 Debug</button>
           <button id="toggleMessagesBtn" onclick="toggleStatusPanel()" title="Свернуть сообщения">📨</button>
+        </div>
+        <div class="controls chart-controls" id="inverseControls" style="display:none;">
+          <button onclick="solveInverseTask()">Solve inverse</button>
+          <button onclick="generateRandomInverseProblem()">Random inverse problem</button>
+          <button onclick="randomizeNonFixedInverseTargets()">Randomize non-fixed values</button>
+          <button onclick="clearInverseTargets()">Clear</button>
         </div>
       </div>
 
@@ -513,6 +598,28 @@
     </div>
   </div>
   
+
+  <div class="container" id="inverseSection" style="display:none;">
+    <div class="panel wide-panel">
+      <h2>Inverse Task (10 parameters)</h2>
+      <p style="margin-top:0; font-size: 0.95em; color:#555;">
+        Select any 10 parameters (input or derived), enter target values, optionally lock rows, then solve to reconstruct a vessel.
+      </p>
+      <div class="controls" style="margin-top: 10px;">
+        <button onclick="solveInverseTask()">Solve inverse</button>
+        <button onclick="generateRandomInverseProblem()">Random inverse problem</button>
+        <button onclick="randomizeNonFixedInverseTargets()">Randomize non-fixed values</button>
+        <button onclick="clearInverseTargets()">Clear</button>
+      </div>
+      <div id="inverseParamListBlock">
+
+      
+      <div id="inverseTargetsContainer"></div>
+      <div id="inverseStatus" style="margin-top:10px; font-size: 0.9em; color:#2c3e50;"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="container">
     <!-- Панель результатов -->
     <div class="panel">
@@ -852,7 +959,78 @@
   let currentAValue = 22;
   let chartParams = {};
   let autoRecalcEnabled = false;
-  let recalcTimeout = null;
+  let fixedParams = {};
+
+  // Helpers for immediate "Fix" behavior (avoid any state desync)
+  function isParamFixed(paramKey) {
+    const cb = document.getElementById(`fix_${paramKey}`);
+    if (cb) return !!cb.checked;
+    return !!fixedParams[paramKey];
+  }
+  function setParamFixed(paramKey, isFixed) {
+    fixedParams[paramKey] = !!isFixed;
+    localStorage.setItem(`vessel_fix_${paramKey}`, JSON.stringify(!!isFixed));
+  }
+  let recalcTimeout = null;// ========== РЕЖИМ РАБОТЫ (DIRECT / INVERSE) ==========
+let currentWorkMode = 'direct';
+let inverseListHomeParent = null;
+let inverseListBlock = null;
+
+function setWorkMode(mode) {
+  if (mode !== 'direct' && mode !== 'inverse') mode = 'direct';
+  currentWorkMode = mode;
+
+  const directBtn = document.getElementById('modeDirectBtn');
+  const inverseBtn = document.getElementById('modeInverseBtn');
+  if (directBtn && inverseBtn) {
+    directBtn.classList.toggle('active', mode === 'direct');
+    inverseBtn.classList.toggle('active', mode === 'inverse');
+  }
+
+  const titleEl = document.getElementById('leftParamsTitle');
+  if (titleEl) {
+    titleEl.textContent = (mode === 'direct') ? 'Vessel Parameters' : 'Inverse Task (10 parameters)';
+  }
+
+  const directWrap = document.getElementById('directParamsWrap');
+  const inverseWrap = document.getElementById('inverseParamsWrap');
+  const directControls = document.getElementById('directControls');
+  const inverseControls = document.getElementById('inverseControls');
+
+  if (directWrap) directWrap.style.display = (mode === 'direct') ? 'block' : 'none';
+  if (inverseWrap) inverseWrap.style.display = (mode === 'inverse') ? 'block' : 'none';
+  if (directControls) directControls.style.display = (mode === 'direct') ? 'flex' : 'none';
+  if (inverseControls) inverseControls.style.display = (mode === 'inverse') ? 'flex' : 'none';
+
+  // Переносим единый DOM-блок инверсных параметров в левую панель ИЛИ возвращаем обратно.
+  // Важно: при переключении НЕ "добавлять" — в контейнере должен быть ровно один актуальный блок.
+  if (!inverseListBlock) {
+    inverseListBlock = document.getElementById('inverseParamListBlock');
+    if (inverseListBlock) inverseListHomeParent = inverseListBlock.parentElement;
+  }
+
+  if (inverseListBlock && inverseWrap && inverseListHomeParent) {
+    if (mode === 'inverse') {
+      // очистим inverseWrap от возможных "хвостов", но не трогаем сам inverseListBlock
+      Array.from(inverseWrap.childNodes).forEach(n => { if (n !== inverseListBlock) inverseWrap.removeChild(n); });
+      if (inverseListBlock.parentElement !== inverseWrap) inverseWrap.appendChild(inverseListBlock);
+    } else {
+      // возвращаем блок обратно вниз (в его родной контейнер)
+      if (inverseListBlock.parentElement !== inverseListHomeParent) inverseListHomeParent.appendChild(inverseListBlock);
+      // и гарантируем, что inverseWrap пуст (чтобы ничего не "добавлялось")
+      Array.from(inverseWrap.childNodes).forEach(n => { if (n !== inverseListBlock) inverseWrap.removeChild(n); });
+      if (inverseListBlock.parentElement === inverseWrap) inverseWrap.removeChild(inverseListBlock);
+    }
+  }
+
+  // Основную нижнюю панель инверсной задачи скрываем всегда (лист переносится влево)
+  const invSection = document.getElementById('inverseSection');
+  if (invSection) invSection.style.display = 'none';
+
+  localStorage.setItem('vessel_workMode', currentWorkMode);
+}
+
+
 
   // ========== 3D ВИЗУАЛИЗАЦИЯ ПЕРЕМЕННЫЕ ==========
   let canvas3D, ctx3D;
@@ -1027,6 +1205,7 @@
     // Сохраняем нормированные значения линейных параметров перед обновлением
     const normValues = {};
     ['B', 'l_S', 'h_F'].forEach(paramId => {
+      if (isParamFixed(paramId)) { return; }
       const inputEl = document.getElementById(`value_${paramId}`);
       if (inputEl && inputEl.value) {
         const currentValue = parseFloat(inputEl.value);
@@ -1038,11 +1217,12 @@
     
     // Обновляем линейные параметры (B, l_S, h_F)
     ['B', 'l_S', 'h_F'].forEach(paramId => {
+      if (isParamFixed(paramId)) { return; }
       const paramDef = inputParams.find(p => p.key === paramId);
       if (!paramDef) return;
       
-      const currentMode = document.getElementById('ontologySelect').value;
-      const normRange = ontologyRanges[currentMode].ranges[paramId];
+      const baseMode = 'all';
+      const normRange = ontologyRanges[baseMode].ranges[paramId];
       if (!normRange) return;
       
       // Диапазоны в абсолютных значениях
@@ -1091,11 +1271,12 @@
     
     // Обновляем delta и gamma напрямую из онтологии (без нормирования)
     ['delta', 'gamma'].forEach(paramId => {
+      if (isParamFixed(paramId)) { return; }
       const paramDef = inputParams.find(p => p.key === paramId);
       if (!paramDef) return;
       
-      const currentMode = document.getElementById('ontologySelect').value;
-      const range = ontologyRanges[currentMode].ranges[paramId];
+      const baseMode = 'all';
+      const range = ontologyRanges[baseMode].ranges[paramId];
       if (!range) return;
       
       // Устанавливаем значения напрямую из онтологии
@@ -1141,6 +1322,7 @@
     // Сохраняем нормированные значения линейных параметров перед обновлением
     const savedNormValues = {};
     ['B', 'l_S', 'h_F'].forEach(paramId => {
+      if (isParamFixed(paramId)) { return; }
       const inputEl = document.getElementById(`value_${paramId}`);
       if (inputEl && inputEl.value) {
         const currentValue = parseFloat(inputEl.value);
@@ -1155,6 +1337,7 @@
     
     // Восстанавливаем нормированные значения линейных параметров
     ['B', 'l_S', 'h_F'].forEach(paramId => {
+      if (isParamFixed(paramId)) { return; }
       if (savedNormValues[paramId] !== undefined) {
         const inputEl = document.getElementById(`value_${paramId}`);
         const sliderEl = document.getElementById(`slider_${paramId}`);
@@ -1377,6 +1560,7 @@
       
       // 5. Устанавливаем значения в UI
       inputParams.forEach(def => {
+        if (isParamFixed(def.key)) { return; }
         const el = document.getElementById(`value_${def.key}`);
         const slider = document.getElementById(`slider_${def.key}`);
         const sliderVal = document.getElementById(`sliderVal_${def.key}`);
@@ -1457,6 +1641,7 @@
       row.id = `row_${p.key}`;
       row.innerHTML = `
         <div class="param-symbol">${p.symbol}</div>
+        <div class="param-fix"><input type="checkbox" id="fix_${p.key}" title="Fix parameter"><span class="fix-label">Fix</span></div>
         <div class="param-name">${p.name}</div>
         <input type="number" class="param-value" id="value_${p.key}" step="${p.step}" placeholder="—">
         <div class="param-unit">${p.unit || ''}</div>
@@ -1477,6 +1662,40 @@
       const sliderEl = sliderContainer.querySelector(`#slider_${p.key}`);
       const sliderValEl = sliderContainer.querySelector(`#sliderVal_${p.key}`);
 
+      // Fix (lock) checkbox per parameter
+      fixedParams[p.key] = fixedParams[p.key] || false;
+      const fixEl = row.querySelector(`#fix_${p.key}`);
+      if (fixEl) {
+        // restore from localStorage if available
+        const savedFix = localStorage.getItem(`vessel_fix_${p.key}`);
+        if (savedFix !== null) {
+          fixedParams[p.key] = JSON.parse(savedFix);
+        }
+        fixEl.checked = !!fixedParams[p.key];
+
+        const applyFixUI = () => {
+          if (fixEl.checked) {
+            row.classList.add('param-fixed');
+            inputEl.disabled = true;
+            sliderEl.disabled = true;
+          } else {
+            row.classList.remove('param-fixed');
+            inputEl.disabled = false;
+            sliderEl.disabled = false;
+          }
+        };
+
+        applyFixUI();
+
+        const onFixToggle = () => {
+          setParamFixed(p.key, fixEl.checked);
+          applyFixUI();
+        };
+        // Use both 'input' and 'change' to guarantee immediate lock before any randomization.
+        fixEl.addEventListener('input', onFixToggle);
+        fixEl.addEventListener('change', onFixToggle);
+        fixEl.addEventListener('click', onFixToggle);
+      }
       let initial;
       if (p.key === 'A') {
         initial = 22;
@@ -3086,6 +3305,1019 @@
     }
   }
 
+
+  // ===================== INVERSE TASK (10 PARAMETERS) =====================
+  const INVERSE_TARGET_COUNT = 10;
+  let inverseUIInitialized = false;
+  let inverseAutoSolveEnabled = false;
+  let inverseAutoTimeout = null;
+  let inverseApplyingSolution = false;
+  let inverseSolveInProgress = false;
+  const inverseRowRanges = Array.from({length: INVERSE_TARGET_COUNT}, () => (null)); // will be set per-row from ontology/model
+
+
+  function getAllSelectableParams() {
+    const list = [];
+    // Input params
+    inputParams.forEach(p => {
+      list.push({ key: p.key, symbol: p.symbol, name: p.name, unit: p.unit || '' });
+    });
+    // Derived params
+    derivedParams.forEach(p => {
+      list.push({ key: p.key, symbol: p.symbol, name: p.name, unit: '' });
+    });
+    return list;
+  }
+
+  
+  function scheduleInverseAutoSolve() {
+    if (!inverseAutoSolveEnabled || inverseApplyingSolution || inverseSolveInProgress) return;
+    if (inverseAutoTimeout) clearTimeout(inverseAutoTimeout);
+    inverseAutoTimeout = setTimeout(() => {
+      inverseAutoTimeout = null;
+      if (!inverseAutoSolveEnabled || inverseApplyingSolution || inverseSolveInProgress) return;
+      inverseSolveInProgress = true;
+      try { solveInverseTask(true); }
+      catch (e) { setInverseStatus('Auto-solve failed: ' + e.message, true); }
+      finally { inverseSolveInProgress = false; }
+    }, 650);
+  }
+
+  function getInverseRangeForKey(key, prevRange = null) {
+    const k = (key || '').trim();
+    if (!k) {
+      return prevRange; // keep last-known-good (do not fall back to synthetic ranges)
+    }
+    // Unit from selectable params (works for both input and derived)
+    let unitHint = '';
+    try {
+      const pp = getAllSelectableParams().find(p => p.key === k);
+      unitHint = pp ? (pp.unit || '') : '';
+    } catch (_) { unitHint = ''; }
+
+    // Prefer input parameter ranges (already set from ontology All vessels for Direct, and stable)
+    const ip = inputParams.find(p => p.key === k);
+    if (ip) {
+      const min = isFinite(ip.min) ? ip.min : (prevRange && isFinite(prevRange.min) ? prevRange.min : 0);
+      const max = isFinite(ip.max) ? ip.max : (prevRange && isFinite(prevRange.max) ? prevRange.max : 1);
+      const step = (isFinite(ip.step) && ip.step > 0) ? ip.step : (prevRange && isFinite(prevRange.step) && prevRange.step > 0 ? prevRange.step : 0.01);
+      return { min, max, step, unit: ip.unit || '' };
+    }
+
+    // Prefer universal derived ranges (computed once from the vessel model over All-vessels input bounds)
+    if (derivedUniversalRanges && derivedUniversalRanges[k] && isFinite(derivedUniversalRanges[k].min) && isFinite(derivedUniversalRanges[k].max)) {
+      const min = derivedUniversalRanges[k].min;
+      const max = derivedUniversalRanges[k].max;
+      const step = Math.max((max - min) / 200, 1e-6);
+      // unit for derived is handled in derivedParams table; keep empty here (or add if you later map units)
+      return { min, max, step, unit: unitHint };
+    }
+
+    // Fallback to current computed value if available
+    const v = (currentParams && typeof currentParams[k] === 'number') ? currentParams[k] : undefined;
+    if (typeof v === 'number' && isFinite(v)) {
+      const span = Math.abs(v) < 1e-9 ? 1.0 : Math.abs(v) * 0.5;
+      const min = v - span;
+      const max = v + span;
+      const step = Math.max((max - min) / 200, 1e-6);
+      return { min, max, step, unit: unitHint };
+    }
+
+    // Last resort: keep previous range if any, otherwise 0..1
+    return prevRange; // do not synthesize fallback ranges during interaction
+  }
+
+  function clamp(val, min, max) {
+    return Math.min(Math.max(val, min), max);
+  }
+
+  function formatInvValue(v, step) {
+    if (!isFinite(v)) return '';
+    const decimals = (step < 1) ? 4 : 0;
+    return Number(v).toFixed(decimals);
+  }
+
+  function setInverseRowDisabled(i, disabled) {
+    const row = document.getElementById(`inv_row_${i}`);
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const val = document.getElementById(`inv_val_${i}`);
+    const slider = document.getElementById(`inv_slider_${i}`);
+    if (row) row.classList.toggle('param-fixed', !!disabled);
+    if (sel) sel.disabled = !!disabled;
+    if (val) val.disabled = !!disabled;
+    if (slider) slider.disabled = !!disabled;
+  }
+
+  function syncInverseSliderFromValue(i) {
+    const rr = inverseRowRanges[i];
+    if (!rr) return;
+    const valEl = document.getElementById(`inv_val_${i}`);
+    const sEl = document.getElementById(`inv_slider_${i}`);
+    const svEl = document.getElementById(`inv_sliderVal_${i}`);
+    if (!valEl || !sEl || !svEl) return;
+
+    const v = parseFloat(valEl.value);
+    if (!isFinite(v)) {
+      svEl.textContent = '—';
+      return;
+    }
+
+    const cl = clamp(v, rr.min, rr.max);
+    const t = (rr.max === rr.min) ? 50 : ((cl - rr.min) / (rr.max - rr.min)) * 100;
+    sEl.value = clamp(t, 0, 100);
+    svEl.textContent = formatInvValue(cl, rr.step);
+  }
+
+  function syncInverseValueFromSlider(i) {
+    const rr = inverseRowRanges[i];
+    if (!rr) return;
+    const valEl = document.getElementById(`inv_val_${i}`);
+    const sEl = document.getElementById(`inv_slider_${i}`);
+    const svEl = document.getElementById(`inv_sliderVal_${i}`);
+    if (!valEl || !sEl || !svEl) return;
+
+    const t = parseFloat(sEl.value);
+    const raw = rr.min + (rr.max - rr.min) * (t / 100);
+    const steps = Math.round((raw - rr.min) / rr.step);
+    const v = clamp(rr.min + steps * rr.step, rr.min, rr.max);
+
+    valEl.value = formatInvValue(v, rr.step);
+    svEl.textContent = formatInvValue(v, rr.step);
+  }
+
+  
+  function refreshAllInverseRowRangesFromModel() {
+    // Recompute row ranges after universal derived ranges become available.
+    // Avoid triggering auto-solve loops while only refreshing UI ranges.
+    const prevApplying = inverseApplyingSolution;
+    inverseApplyingSolution = true;
+    try {
+      for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+        const sel = document.getElementById(`inv_sel_${i}`);
+        const valEl = document.getElementById(`inv_val_${i}`);
+        if (!sel || !valEl) continue;
+        const key = (sel.value || '').trim();
+        if (!key) continue;
+        const cur = parseFloat(valEl.value);
+        updateInverseRowRange(i, isFinite(cur) ? cur : null);
+      }
+    } finally {
+      inverseApplyingSolution = prevApplying;
+    }
+  }
+
+function updateInverseRowRange(i, preserveValue = null) {
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const unitEl = document.getElementById(`inv_unit_${i}`);
+    const valEl = document.getElementById(`inv_val_${i}`);
+    const sEl = document.getElementById(`inv_slider_${i}`);
+    const svEl = document.getElementById(`inv_sliderVal_${i}`);
+    if (!sel || !unitEl || !valEl || !sEl || !svEl) return;
+
+    const key = (sel.value || '').trim();
+    if (!key) {
+      unitEl.textContent = '';
+      // Do not reset stored ranges when selection is temporarily empty (e.g., during DOM refresh)
+      if (!inverseRowRanges[i]) {
+        valEl.removeAttribute('min'); valEl.removeAttribute('max'); valEl.removeAttribute('step');
+        svEl.textContent = '—';
+        sEl.value = 50;
+      }
+      return;
+    }
+
+    const r = getInverseRangeForKey(key, inverseRowRanges[i] || null);
+    if (!r || !isFinite(r.min) || !isFinite(r.max) || !isFinite(r.step) || r.step<=0) {
+      // Range not ready/unknown: keep previous range and do not reset sliders
+      return;
+    }
+    inverseRowRanges[i] = { min: r.min, max: r.max, step: r.step };
+
+    unitEl.textContent = r.unit || '';
+    valEl.min = r.min;
+    valEl.max = r.max;
+    valEl.step = r.step;
+
+    let v;
+    if (preserveValue !== null && isFinite(preserveValue)) v = preserveValue;
+    else {
+      const cur = parseFloat(valEl.value);
+      if (isFinite(cur)) v = cur;
+      else if (currentParams && typeof currentParams[key] === 'number' && isFinite(currentParams[key])) v = currentParams[key];
+      else v = (r.min + r.max) / 2;
+    }
+
+    v = clamp(v, r.min, r.max);
+    const steps = Math.round((v - r.min) / r.step);
+    v = clamp(r.min + steps * r.step, r.min, r.max);
+
+    valEl.value = formatInvValue(v, r.step);
+    syncInverseSliderFromValue(i);
+  }
+
+  function initInverseUI() {
+    const container = document.getElementById('inverseTargetsContainer');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Auto-solve toggle (same style as Vessel Parameters)
+    const autoRow = document.createElement('div');
+    autoRow.className = 'param-row';
+    autoRow.innerHTML = `
+      <div class="param-symbol">🔄</div>
+      <div class="param-fix" style="display:flex;justify-content:center;"></div>
+      <div class="param-name">Auto-solve inverse</div>
+      <div style="display:flex; align-items:center; gap:10px; margin-left:auto;">
+        <label class="switch">
+          <input type="checkbox" id="inverseAutoSolveToggle">
+          <span class="slider round"></span>
+        </label>
+        <span id="inverseAutoSolveStatus" style="font-size: 13px; color: #7f8c8d;">Off</span>
+      </div>
+    `;
+    container.appendChild(autoRow);
+
+    const selectable = getAllSelectableParams();
+    const opts = selectable.map(p => `<option value="${p.key}">${p.symbol} — ${p.name}</option>`).join('');
+
+    for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+      // Main row
+      const row = document.createElement('div');
+      row.className = 'param-row';
+      row.id = `inv_row_${i}`;
+      row.innerHTML = `
+        <div class="param-symbol">${i+1}</div>
+
+        <div class="param-fix">
+          <label style="display:flex; align-items:center; gap:6px; justify-content:center;">
+            <input type="checkbox" class="fixbox" id="inv_fix_${i}" style="width:18px;height:18px;accent-color:#3498db;">
+            <span style="font-size:12px; color:#7f8c8d;">Fix</span>
+          </label>
+        </div>
+
+        <div class="param-name" style="flex:2;">
+          <select id="inv_sel_${i}" class="inverse-select">
+            <option value="">— select —</option>
+            ${opts}
+          </select>
+        </div>
+
+        <input type="number" class="param-value" id="inv_val_${i}" placeholder="—" style="width:110px;">
+        <div class="inv-unit" id="inv_unit_${i}"></div>
+      `;
+      container.appendChild(row);
+
+      // Slider row (same as Vessel Parameters)
+      const sliderContainer = document.createElement('div');
+      sliderContainer.className = 'slider-container';
+      sliderContainer.innerHTML = `
+        <div class="slider-row">
+          <span class="slider-value" id="inv_sliderVal_${i}">—</span>
+          <input type="range" class="param-slider" id="inv_slider_${i}" min="0" max="100" step="1" value="50">
+        </div>
+      `;
+      container.appendChild(sliderContainer);
+
+      const sel = row.querySelector(`#inv_sel_${i}`);
+      const val = row.querySelector(`#inv_val_${i}`);
+      const fix = row.querySelector(`#inv_fix_${i}`);
+      const slider = sliderContainer.querySelector(`#inv_slider_${i}`);
+
+      fix.addEventListener('change', () => {
+        setInverseRowDisabled(i, fix.checked);
+        // Keep values; just lock UI. Auto-solve only if unlock + enabled.
+        if (!fix.checked) scheduleInverseAutoSolve();
+      });
+
+      sel.addEventListener('change', () => {
+        updateInverseRowRange(i);
+        if (!fix.checked) scheduleInverseAutoSolve();
+      });
+
+      // Live sync while typing/dragging (no auto-solve here to keep UI responsive)
+      val.addEventListener('input', () => {
+        if (fix.checked) return;
+        syncInverseSliderFromValue(i);
+      });
+      // Auto-solve only when the edit is committed
+      val.addEventListener('change', () => {
+        if (fix.checked) return;
+        syncInverseSliderFromValue(i);
+        scheduleInverseAutoSolve();
+      });
+
+      // Live sync while dragging (no auto-solve on every tick)
+      slider.addEventListener('input', () => {
+        if (fix.checked) return;
+        syncInverseValueFromSlider(i);
+      });
+      // Auto-solve after drag end
+      slider.addEventListener('change', () => {
+        if (fix.checked) return;
+        syncInverseValueFromSlider(i);
+        scheduleInverseAutoSolve();
+      });
+
+      // init default range
+      updateInverseRowRange(i);
+      setInverseRowDisabled(i, false);
+    }
+
+    // Toggle handler + persistence
+    const tgl = document.getElementById('inverseAutoSolveToggle');
+    const st = document.getElementById('inverseAutoSolveStatus');
+    if (tgl && st) {
+      tgl.addEventListener('change', function() {
+        inverseAutoSolveEnabled = this.checked;
+        if (inverseAutoSolveEnabled) {
+          st.textContent = 'On';
+          st.style.color = '#2ecc71';
+          setInverseStatus('Auto-solve enabled.');
+          scheduleInverseAutoSolve();
+        } else {
+          st.textContent = 'Off';
+          st.style.color = '#7f8c8d';
+          setInverseStatus('Auto-solve disabled.');
+        }
+        localStorage.setItem('vessel_inverseAutoSolveEnabled', JSON.stringify(inverseAutoSolveEnabled));
+      });
+
+      const saved = localStorage.getItem('vessel_inverseAutoSolveEnabled');
+      if (saved !== null) {
+        inverseAutoSolveEnabled = JSON.parse(saved);
+        tgl.checked = inverseAutoSolveEnabled;
+        if (inverseAutoSolveEnabled) { st.textContent='On'; st.style.color='#2ecc71'; }
+      }
+    }
+
+    inverseUIInitialized = true;
+  }
+
+  function clearInverseTargets() {
+    for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+      const sel = document.getElementById(`inv_sel_${i}`);
+      const val = document.getElementById(`inv_val_${i}`);
+      const fix = document.getElementById(`inv_fix_${i}`);
+      const unit = document.getElementById(`inv_unit_${i}`);
+      const sEl = document.getElementById(`inv_slider_${i}`);
+      const svEl = document.getElementById(`inv_sliderVal_${i}`);
+      if (sel) sel.value = '';
+      if (val) val.value = '';
+      if (fix) fix.checked = false;
+      if (unit) unit.textContent = '';
+      if (sEl) sEl.value = 50;
+      if (svEl) svEl.textContent = '—';
+      setInverseRowDisabled(i, false);
+      updateInverseRowRange(i);
+    }
+    const st = document.getElementById('inverseStatus');
+    if (st) st.textContent = '';
+  }
+
+  function getInverseTargets() {
+    const targets = {};
+    const selected = new Set();
+    const issues = [];
+
+    for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+      const sel = document.getElementById(`inv_sel_${i}`);
+      const val = document.getElementById(`inv_val_${i}`);
+      if (!sel || !val) continue;
+      const key = (sel.value || '').trim();
+      if (!key) { issues.push(`Row ${i+1}: parameter not selected`); continue; }
+      if (selected.has(key)) { issues.push(`Row ${i+1}: duplicate parameter ${key}`); continue; }
+      selected.add(key);
+      const v = parseFloat(val.value);
+      if (!isFinite(v)) { issues.push(`Row ${i+1}: value is not a number`); continue; }
+      targets[key] = v;
+    }
+
+    if (Object.keys(targets).length !== INVERSE_TARGET_COUNT) {
+      issues.push(`Need exactly ${INVERSE_TARGET_COUNT} valid, unique target parameters.`);
+    }
+
+    return { targets, issues };
+  }
+
+  function setInverseStatus(msg, isError=false) {
+    const st = document.getElementById('inverseStatus');
+    if (!st) return;
+    st.style.color = isError ? '#c0392b' : '#2c3e50';
+    st.textContent = msg;
+  }
+
+  // Build a random REAL parameter set consistent with current ontology ranges
+  function sampleRandomRealParamsForMode(modeKey) {
+    const mode = ontologyRanges[modeKey] ? modeKey : 'all';
+    const ranges = ontologyRanges[mode].ranges;
+
+    // A
+    const A_rng = ranges['A'] || { min: 4, max: 40, step: 2 };
+    const stepsA = Math.floor((A_rng.max - A_rng.min) / A_rng.step);
+    const A = A_rng.min + Math.floor(Math.random() * (stepsA + 1)) * A_rng.step;
+
+    // Helpers
+    const pick = (rng) => {
+      const steps = Math.floor((rng.max - rng.min) / rng.step);
+      return rng.min + Math.floor(Math.random() * (steps + 1)) * rng.step;
+    };
+
+    const Bn = pick(ranges['B']);
+    const lSn = pick(ranges['l_S']);
+    const hFn = pick(ranges['h_F']);
+    const phi_S = pick(ranges['phi_S']);
+    const phi_F = pick(ranges['phi_F']);
+    const alpha_S = pick(ranges['alpha_S']);
+    const alpha_F = pick(ranges['alpha_F']);
+    const delta = pick(ranges['delta']);
+    const gamma = pick(ranges['gamma']);
+
+    return {
+      A,
+      B: Bn * A,
+      l_S: lSn * A,
+      h_F: hFn * A,
+      phi_S,
+      phi_F,
+      alpha_S,
+      alpha_F,
+      delta,
+      gamma
+    };
+  }
+
+  // Core computation (pure-ish) for inverse solver.
+  // Returns { ok, params, chartParams, warnings, errorMessage }
+  function computeVesselFromRealParams(p_real) {
+    try {
+      const A_real = p_real.A;
+      if (!(A_real > 0)) return { ok:false, errorMessage:'A must be > 0' };
+
+      const p_norm = getNormalizedParams(p_real);
+
+      const phi_S_rad = degToRad(p_norm.phi_S);
+      const phi_F_rad = degToRad(p_norm.phi_F);
+      const alpha_S_rad = degToRad(p_norm.alpha_S);
+      const alpha_F_rad = degToRad(p_norm.alpha_F);
+
+      const rx = 0.5;
+      const ry = 0.5 * p_norm.B;
+
+      const y_S = ry * Math.sin(phi_S_rad);
+      const x_S = rx * Math.cos(phi_S_rad);
+      const y_F = ry * Math.sin(phi_F_rad);
+      const x_F = rx * Math.cos(phi_F_rad);
+      const y_T = y_S + p_norm.l_S * Math.sin(alpha_S_rad);
+      const x_T = x_S + p_norm.l_S * Math.cos(alpha_S_rad);
+      const y_G = y_F - p_norm.h_F;
+
+      const sin_aF = Math.sin(alpha_F_rad);
+      if (Math.abs(sin_aF) < 1e-6) return { ok:false, errorMessage:'sin(alpha_F) too small' };
+      const cot_aF = Math.cos(alpha_F_rad) / sin_aF;
+      const x_G = x_F - p_norm.h_F * cot_aF;
+
+      const h_norm = y_T - y_G;
+      const h_abs_norm = Math.abs(h_norm);
+
+      const half_A = 0.5;
+      const limit_norm = 0.6 * h_abs_norm;
+      let x_L_norm;
+
+      if (x_G > half_A) x_L_norm = x_G;
+      else if (half_A <= limit_norm) x_L_norm = half_A;
+      else x_L_norm = limit_norm;
+
+      const S_SF_norm = Math.PI * (y_S + ry);
+      const S_ST_norm = Math.PI * p_norm.l_S * (x_S + x_T);
+      const S_FG_norm = (Math.PI * p_norm.h_F / Math.abs(Math.sin(alpha_F_rad))) * (x_F + x_G);
+      const S_L_norm = Math.PI * x_L_norm * x_L_norm;
+      const S_norm = S_SF_norm + S_ST_norm + S_FG_norm + S_L_norm;
+
+      const V_SF_norm = Math.PI * (rx * rx) * Math.pow(y_S + ry, 2) * (2 * ry - y_S) / (3 * ry * ry);
+      const V_ST_norm = (Math.PI / 3) * (y_T - y_S) * (x_T * x_T + x_T * x_S + x_S * x_S);
+      const V_norm = V_SF_norm + V_ST_norm;
+
+      const P_norm = S_norm * p_norm.delta * p_norm.gamma;
+
+      const params = {
+        // input (real)
+        A: p_real.A,
+        B: p_real.B,
+        l_S: p_real.l_S,
+        h_F: p_real.h_F,
+        phi_S: p_real.phi_S,
+        phi_F: p_real.phi_F,
+        alpha_S: p_real.alpha_S,
+        alpha_F: p_real.alpha_F,
+        delta: p_real.delta,
+        gamma: p_real.gamma,
+
+        // derived (real)
+        h: h_norm * A_real,
+        h_S: (y_T - y_S) * A_real,
+        d_T: 2 * x_T * A_real,
+        d_S: 2 * x_S * A_real,
+        d_F: 2 * x_F * A_real,
+        d_G: 2 * x_G * A_real,
+        d_L: 2 * x_L_norm * A_real,
+        V_SF: V_SF_norm * Math.pow(A_real, 3),
+        V: V_norm * Math.pow(A_real, 3),
+        P: P_norm * Math.pow(A_real, 2),
+
+        // internal
+        S: S_norm * Math.pow(A_real, 2)
+      };
+
+      const chartP = {
+        x_S, y_S, x_F, y_F, x_T, y_T, x_G, y_G,
+        x_L: x_L_norm,
+        S_SF: S_SF_norm, S_ST: S_ST_norm, S_FG: S_FG_norm, S_L: S_L_norm, S: S_norm,
+        phi_S_rad, phi_F_rad,
+        A: rx,
+        B: ry
+      };
+
+      return { ok:true, params, chartParams: chartP, warnings: [] };
+    } catch (e) {
+      return { ok:false, errorMessage: e && e.message ? e.message : String(e) };
+    }
+  }
+  function buildStateFromReal(p_real) {
+    return {
+      A: p_real.A,
+      delta: p_real.delta,
+      gamma: p_real.gamma,
+      Bn: p_real.B / p_real.A,
+      lSn: p_real.l_S / p_real.A,
+      hFn: p_real.h_F / p_real.A,
+      phi_S: p_real.phi_S,
+      phi_F: p_real.phi_F,
+      alpha_S: p_real.alpha_S,
+      alpha_F: p_real.alpha_F
+    };
+  }
+
+  let derivedUniversalRanges = null;   // { key: {min,max} }
+  let derivedUniversalRangesInfo = { computed:false, validSamples:0, totalSamples:0 };
+
+  function computeUniversalDerivedRanges_AllVesselsCorners() {
+    try {
+      const base = (ontologyRanges && ontologyRanges.all && ontologyRanges.all.ranges) ? ontologyRanges.all.ranges : null;
+      if (!base) return;
+
+      // Corner values (min/max only). For B/l_S/h_F we use normalized corners.
+      const corners = {
+        A: [base.A.min, base.A.max],
+        Bn: [base.B.min, base.B.max],
+        lSn: [base.l_S.min, base.l_S.max],
+        hFn: [base.h_F.min, base.h_F.max],
+        phi_S: [base.phi_S.min, base.phi_S.max],
+        phi_F: [base.phi_F.min, base.phi_F.max],
+        alpha_S: [base.alpha_S.min, base.alpha_S.max],
+        alpha_F: [base.alpha_F.min, base.alpha_F.max],
+        delta: [base.delta.min, base.delta.max],
+        gamma: [base.gamma.min, base.gamma.max]
+      };
+
+      const keys = ['h','h_S','d_T','d_S','d_F','d_G','d_L','V_SF','V','P'];
+      const ranges = {};
+      keys.forEach(k => ranges[k] = { min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY });
+
+      let total = 0;
+      let valid = 0;
+
+      for (const A_real of corners.A) {
+        for (const Bn of corners.Bn) {
+          for (const lSn of corners.lSn) {
+            for (const hFn of corners.hFn) {
+              for (const phi_S of corners.phi_S) {
+                for (const phi_F of corners.phi_F) {
+                  for (const alpha_S of corners.alpha_S) {
+                    for (const alpha_F of corners.alpha_F) {
+                      for (const delta of corners.delta) {
+                        for (const gamma of corners.gamma) {
+                          total++;
+
+                          const p_real = {
+                            A: A_real,
+                            B: Bn * A_real,
+                            l_S: lSn * A_real,
+                            h_F: hFn * A_real,
+                            phi_S, phi_F, alpha_S, alpha_F,
+                            delta, gamma
+                          };
+
+                          const out = computeVesselFromRealParams(p_real);
+                          if (!out || !out.ok || !out.params) continue;
+
+                          valid++;
+                          const pr = out.params;
+                          keys.forEach(k => {
+                            const v = pr[k];
+                            if (!isFinite(v)) return;
+                            if (v < ranges[k].min) ranges[k].min = v;
+                            if (v > ranges[k].max) ranges[k].max = v;
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // If nothing valid, keep null
+      if (valid === 0) {
+        derivedUniversalRanges = null;
+        derivedUniversalRangesInfo = { computed:true, validSamples:0, totalSamples:total };
+        return;
+      }
+
+      // Finalize
+      derivedUniversalRanges = ranges;
+      derivedUniversalRangesInfo = { computed:true, validSamples:valid, totalSamples:total };
+
+      // Persist (optional, safe)
+      try {
+        localStorage.setItem('vessel_derivedUniversalRanges', JSON.stringify(derivedUniversalRanges));
+        localStorage.setItem('vessel_derivedUniversalRangesInfo', JSON.stringify(derivedUniversalRangesInfo));
+        refreshAllInverseRowRangesFromModel();
+      } catch(e) {}
+    } catch (e) {
+      // silent, do not break app
+      derivedUniversalRanges = null;
+      derivedUniversalRangesInfo = { computed:false, validSamples:0, totalSamples:0 };
+    }
+  }
+
+  function loadUniversalDerivedRangesFromStorage() {
+    try {
+      const s = localStorage.getItem('vessel_derivedUniversalRanges');
+      if (s) derivedUniversalRanges = JSON.parse(s);
+      const i = localStorage.getItem('vessel_derivedUniversalRangesInfo');
+      if (i) derivedUniversalRangesInfo = JSON.parse(i);
+    } catch(e) {}
+  }
+
+  function getUniversalDerivedRange(key) {
+    if (!derivedUniversalRanges) return null;
+    return derivedUniversalRanges[key] || null;
+  }
+
+  function realFromState(s) {
+    return {
+      A: s.A,
+      delta: s.delta,
+      gamma: s.gamma,
+      B: s.Bn * s.A,
+      l_S: s.lSn * s.A,
+      h_F: s.hFn * s.A,
+      phi_S: s.phi_S,
+      phi_F: s.phi_F,
+      alpha_S: s.alpha_S,
+      alpha_F: s.alpha_F
+    };
+  }
+
+  function clampToBounds(s, bounds) {
+    const out = { ...s };
+    Object.keys(bounds).forEach(k => {
+      const b = bounds[k];
+      if (out[k] < b.min) out[k] = b.min;
+      if (out[k] > b.max) out[k] = b.max;
+    });
+    return out;
+  }
+
+  function inverseObjective(state, targets) {
+    const p_real = realFromState(state);
+    // quick consistency checks (mirror readInputParams)
+    if (p_real.A <= 0 || p_real.B <= 0 || p_real.delta <= 0 || p_real.gamma <= 0) return 1e30;
+    if (p_real.phi_S < p_real.phi_F) return 1e25;
+    if (p_real.h_F < 0.1) return 1e25;
+
+    const res = computeVesselFromRealParams(p_real);
+    if (!res.ok) return 1e30;
+
+    let err = 0;
+    const params = res.params;
+
+    for (const k of Object.keys(targets)) {
+      const t = targets[k];
+      const v = params[k];
+      if (v === undefined || t === undefined) return 1e30;
+      const scale = Math.max(1e-9, Math.abs(t), Math.abs(v), 1);
+      const r = (v - t) / scale;
+      err += r * r;
+    }
+    return err;
+  }
+
+  class AdaptiveSA10D {
+    constructor(bounds) {
+      this.bounds = bounds;
+      this.dimKeys = Object.keys(bounds);
+      this.step = {};
+      this.dimKeys.forEach(k => {
+        const b = bounds[k];
+        this.step[k] = (b.max - b.min) * 0.08; // initial proposal scale
+      });
+    }
+
+    neighbor(s, temperature) {
+      const out = { ...s };
+      // perturb a subset for efficiency
+      const kCount = Math.max(2, Math.round(this.dimKeys.length * 0.35));
+      for (let j = 0; j < kCount; j++) {
+        const k = this.dimKeys[Math.floor(Math.random() * this.dimKeys.length)];
+        const sig = this.step[k] * (0.4 + 0.6 * Math.random()) * Math.sqrt(Math.max(temperature, 1e-12));
+        // gaussian-ish by sum of uniforms
+        const g = (Math.random() + Math.random() + Math.random() + Math.random() - 2.0);
+        out[k] += sig * g;
+        // clamp
+        const b = this.bounds[k];
+        if (out[k] < b.min) out[k] = b.min;
+        if (out[k] > b.max) out[k] = b.max;
+      }
+      return out;
+    }
+
+    optimize(initial, objective, opts) {
+      const maxIter = opts.maxIter || 25000;
+      const t0 = opts.t0 || 1.0;
+      const cooling = opts.cooling || 0.9993;
+      const stallLimit = opts.stallLimit || 4000;
+
+      let s = clampToBounds(initial, this.bounds);
+      let e = objective(s);
+      let bestS = { ...s };
+      let bestE = e;
+
+      let T = t0;
+      let stall = 0;
+
+      for (let i = 0; i < maxIter; i++) {
+        const cand = this.neighbor(s, T);
+        const ce = objective(cand);
+        const de = ce - e;
+
+        let accept = false;
+        if (de <= 0) accept = true;
+        else {
+          const p = Math.exp(-de / Math.max(T, 1e-12));
+          accept = (Math.random() < p);
+        }
+
+        if (accept) {
+          s = cand;
+          e = ce;
+          if (e < bestE) {
+            bestE = e;
+            bestS = { ...s };
+            stall = 0;
+          } else {
+            stall++;
+          }
+        } else {
+          stall++;
+        }
+
+        // Cooling
+        T *= cooling;
+
+        // Adapt steps every 200 iters
+        if (i % 200 === 0 && i > 0) {
+          this.dimKeys.forEach(k => {
+            // mild decay of step sizes with temperature to refine late search
+            this.step[k] *= 0.997;
+            const minStep = (this.bounds[k].max - this.bounds[k].min) * 1e-4;
+            if (this.step[k] < minStep) this.step[k] = minStep;
+          });
+        }
+
+        if (stall > stallLimit) {
+          // restart around best
+          s = { ...bestS };
+          e = bestE;
+          stall = 0;
+          T = Math.max(T, t0 * 0.25);
+        }
+
+        // early stop
+        if (bestE < (opts.targetErr || 1e-8)) break;
+      }
+
+      return { bestState: bestS, bestError: bestE };
+    }
+  }
+
+  function localRefine(state, objective, bounds) {
+    // simple coordinate refinement with shrinking step
+    let s = { ...state };
+    let e = objective(s);
+    const keys = Object.keys(bounds);
+    let stepScale = 0.15;
+
+    for (let pass = 0; pass < 10; pass++) {
+      let improved = false;
+      for (const k of keys) {
+        const b = bounds[k];
+        const base = s[k];
+        const step = (b.max - b.min) * stepScale;
+
+        const candidates = [base - step, base + step, base - 0.5*step, base + 0.5*step];
+        for (const cv0 of candidates) {
+          const cv = Math.min(Math.max(cv0, b.min), b.max);
+          const cand = { ...s, [k]: cv };
+          const ce = objective(cand);
+          if (ce < e) {
+            s = cand;
+            e = ce;
+            improved = true;
+          }
+        }
+      }
+      if (!improved) stepScale *= 0.5;
+      if (stepScale < 1e-4) break;
+    }
+    return { bestState: s, bestError: e };
+  }
+
+  function getInverseBoundsForCurrentMode() {
+    const mode = ontologyRanges[currentOntologyMode] ? currentOntologyMode : 'all';
+    const r = ontologyRanges[mode].ranges;
+
+    // We optimize in mixed space: A, delta, gamma, Bn, lSn, hFn, angles (degrees)
+    return {
+      A: { min: r.A.min, max: r.A.max },
+      delta: { min: r.delta.min, max: r.delta.max },
+      gamma: { min: r.gamma.min, max: r.gamma.max },
+      Bn: { min: r.B.min, max: r.B.max },
+      lSn: { min: r.l_S.min, max: r.l_S.max },
+      hFn: { min: r.h_F.min, max: r.h_F.max },
+      phi_S: { min: r.phi_S.min, max: r.phi_S.max },
+      phi_F: { min: r.phi_F.min, max: r.phi_F.max },
+      alpha_S: { min: r.alpha_S.min, max: r.alpha_S.max },
+      alpha_F: { min: r.alpha_F.min, max: r.alpha_F.max }
+    };
+  }
+
+  function setInputParamValue(key, value) {
+    const def = inputParams.find(p => p.key === key);
+    if (!def) return;
+    const inputEl = document.getElementById(`value_${key}`);
+    const sliderEl = document.getElementById(`slider_${key}`);
+    const sliderValEl = document.getElementById(`sliderVal_${key}`);
+    if (!inputEl || !sliderEl || !sliderValEl) return;
+
+    const v = Math.min(Math.max(value, def.min), def.max);
+    const t = (def.max === def.min) ? 50 : ((v - def.min) / (def.max - def.min)) * 100;
+    sliderEl.value = t;
+    inputEl.value = v.toFixed(def.unit === '°' ? 0 : (def.step < 1 ? 2 : 0));
+    sliderValEl.textContent = v.toFixed(def.unit === '°' ? 0 : (def.step < 1 ? 2 : 0));
+
+    if (key === 'A') {
+      handleAChange();
+    }
+  }
+
+  function applyInverseSolutionToUI(bestState) {
+    inverseApplyingSolution = true;
+    try {
+    const p_real = realFromState(bestState);
+    // Set A first (affects ranges)
+    setInputParamValue('A', p_real.A);
+    // For linear params, clamp by current def ranges (already updated by A change)
+    setInputParamValue('B', p_real.B);
+    setInputParamValue('l_S', p_real.l_S);
+    setInputParamValue('h_F', p_real.h_F);
+    setInputParamValue('phi_S', p_real.phi_S);
+    setInputParamValue('phi_F', p_real.phi_F);
+    setInputParamValue('alpha_S', p_real.alpha_S);
+    setInputParamValue('alpha_F', p_real.alpha_F);
+    setInputParamValue('delta', p_real.delta);
+    setInputParamValue('gamma', p_real.gamma);
+
+      calculateVessel();
+    } finally {
+      inverseApplyingSolution = false;
+    }
+  }
+
+  function generateRandomInverseProblem() {
+    // Create a random vessel (without touching UI) and fill 10 random targets
+    const p_real = sampleRandomRealParamsForMode(currentOntologyMode);
+    const res = computeVesselFromRealParams(p_real);
+    if (!res.ok) {
+      setInverseStatus('Random generation failed: ' + res.errorMessage, true);
+      return;
+    }
+    const all = getAllSelectableParams().map(p => p.key).filter(k => res.params[k] !== undefined);
+    // Shuffle
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    const chosen = all.slice(0, INVERSE_TARGET_COUNT);
+
+    for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+      const sel = document.getElementById(`inv_sel_${i}`);
+      const val = document.getElementById(`inv_val_${i}`);
+      const fix = document.getElementById(`inv_fix_${i}`);
+      const unit = document.getElementById(`inv_unit_${i}`);
+      if (!sel || !val || !fix || !unit) continue;
+      if (fix.checked) continue; // respect locks
+
+      sel.value = chosen[i] || '';
+      const p = getAllSelectableParams().find(x => x.key === sel.value);
+      unit.textContent = p ? (p.unit || '') : '';
+
+      const v = res.params[sel.value];
+      val.value = (typeof v === 'number') ? Number(v).toFixed(4) : '';
+      // Sync slider + range immediately after programmatic value change
+      updateInverseRowRange(i, (typeof v === 'number') ? v : null);
+    }
+
+    setInverseStatus('Random inverse problem generated (targets filled).');
+  }
+
+  function randomizeNonFixedInverseTargets() {
+    // Same selected parameters, new values from a new random vessel, but only for rows not fixed.
+    const p_real = sampleRandomRealParamsForMode(currentOntologyMode);
+    const res = computeVesselFromRealParams(p_real);
+    if (!res.ok) {
+      setInverseStatus('Randomization failed: ' + res.errorMessage, true);
+      return;
+    }
+    for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+      const sel = document.getElementById(`inv_sel_${i}`);
+      const val = document.getElementById(`inv_val_${i}`);
+      const fix = document.getElementById(`inv_fix_${i}`);
+      const unit = document.getElementById(`inv_unit_${i}`);
+      if (!sel || !val || !fix || !unit) continue;
+      if (fix.checked) continue;
+
+      const key = (sel.value || '').trim();
+      if (!key) continue;
+      const v = res.params[key];
+      if (typeof v === 'number') {
+        val.value = Number(v).toFixed(4);
+        updateInverseRowRange(i, v);
+      }
+    }
+    setInverseStatus('Non-fixed target values randomized (parameter selection preserved).');
+  }
+
+  function solveInverseTask(isAuto = false) {
+    const { targets, issues } = getInverseTargets();
+    if (issues.length) {
+      setInverseStatus(issues.join(' | '), true);
+      return;
+    }
+
+    setInverseStatus('Solving inverse task...');
+
+    const bounds = getInverseBoundsForCurrentMode();
+
+    // initial guess: from current UI if available, else random
+    let initReal = {};
+    try {
+      const rr = readInputParams();
+      initReal = rr.errors.length ? sampleRandomRealParamsForMode(currentOntologyMode) : rr.params;
+    } catch (_) {
+      initReal = sampleRandomRealParamsForMode(currentOntologyMode);
+    }
+
+    let initState = buildStateFromReal(initReal);
+    initState = clampToBounds(initState, bounds);
+
+    const obj = (s) => inverseObjective(s, targets);
+
+    const sa = new AdaptiveSA10D(bounds);
+    const saRes = sa.optimize(initState, obj, {
+      maxIter: isAuto ? 6000 : 32000,
+      t0: 1.0,
+      cooling: isAuto ? 0.9991 : 0.99935,
+      stallLimit: isAuto ? 1200 : 5000,
+      targetErr: isAuto ? 1e-8 : 1e-10
+    });
+
+    const locRes = localRefine(saRes.bestState, obj, bounds);
+
+    const best = locRes.bestState;
+    const bestErr = locRes.bestError;
+
+    // Apply solution to UI
+    applyInverseSolutionToUI(best);
+
+    // Report quality
+    const rms = Math.sqrt(bestErr / INVERSE_TARGET_COUNT);
+    setInverseStatus(`Inverse solved. RMS relative error ≈ ${(rms*100).toFixed(4)}% (lower is better).`);
+  }
+
   // ========== ИНИЦИАЛИЗАЦИЯ ==========
   function init() {
     initInputParams();
@@ -3118,7 +4350,11 @@
     }
     
     initParamsUI();
-    initChart();
+    initInverseUI();
+    
+    const savedMode = localStorage.getItem('vessel_workMode');
+    setWorkMode(savedMode || 'direct');
+initChart();
     initVerticalScaleControl();
     initHorizontalScaleControl();
     
@@ -3126,7 +4362,16 @@
     
     loadSavedOntologySettings();
     
-    init3DCanvas();
+    
+    // Universal derived ranges (computed once for All vessels domain)
+    loadUniversalDerivedRangesFromStorage();
+    if (!derivedUniversalRangesInfo || !derivedUniversalRangesInfo.computed) {
+      // run after initial UI is up
+      setTimeout(() => {
+        computeUniversalDerivedRanges_AllVesselsCorners();
+      }, 50);
+    }
+init3DCanvas();
     
     if (messagesEnabled) {
         showStatus('Система готова. Сообщения системы включены.', 'success');
