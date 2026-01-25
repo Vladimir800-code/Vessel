@@ -975,9 +975,168 @@
 let currentWorkMode = 'direct';
 let inverseListHomeParent = null;
 let inverseListBlock = null;
+let inverseStateInitialized = false;
+let inverseStateSaveTimer = null;
+
+function getInverseStateFromUI() {
+  const state = [];
+  for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const val = document.getElementById(`inv_val_${i}`);
+    const fix = document.getElementById(`inv_fix_${i}`);
+    state.push({
+      key: sel ? (sel.value || '') : '',
+      value: val ? (val.value || '') : '',
+      fixed: fix ? !!fix.checked : false
+    });
+  }
+  return state;
+}
+
+function applyInverseStateToUI(state) {
+  if (!Array.isArray(state)) return;
+  for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+    const rowState = state[i] || {};
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const val = document.getElementById(`inv_val_${i}`);
+    const fix = document.getElementById(`inv_fix_${i}`);
+    if (sel) sel.value = rowState.key || '';
+    // Update range first (uses current selection)
+    updateInverseRowRange(i);
+    if (val && rowState.value !== undefined && rowState.value !== null && rowState.value !== '') {
+      val.value = rowState.value;
+      syncInverseSliderFromValue(i);
+    } else {
+      // Keep whatever updateInverseRowRange set, but ensure slider matches
+      syncInverseSliderFromValue(i);
+    }
+    if (fix) {
+      fix.checked = !!rowState.fixed;
+      setInverseRowDisabled(i, fix.checked);
+    }
+  }
+}
+
+function saveInverseStateNow() {
+  try {
+    localStorage.setItem('vessel_inverse_state_v1', JSON.stringify(getInverseStateFromUI()));
+  } catch (e) {}
+}
+
+function scheduleSaveInverseState() {
+  if (inverseStateSaveTimer) clearTimeout(inverseStateSaveTimer);
+  inverseStateSaveTimer = setTimeout(saveInverseStateNow, 150);
+}
+
+function loadInverseState() {
+  try {
+    const raw = localStorage.getItem('vessel_inverse_state_v1');
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return Array.isArray(obj) ? obj : null;
+  } catch (e) { return null; }
+}
+
+// Ensure inverse panel has a stable default state when entering inverse mode.
+// No randomization here; randomization happens only via "Random inverse problem".
+function ensureInverseStateInitialized() {
+  if (inverseStateInitialized) return;
+
+  // If user already has a non-empty selection, treat it as initialized.
+  let anySelected = false;
+  for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+    const sel = document.getElementById(`inv_sel_${i}`);
+    if (sel && sel.value) { anySelected = true; break; }
+  }
+  if (anySelected) {
+    inverseStateInitialized = true;
+    saveInverseStateNow();
+    return;
+  }
+
+  // Try restore from saved state
+  const saved = loadInverseState();
+  if (saved) {
+    applyInverseStateToUI(saved);
+    inverseStateInitialized = true;
+    return;
+  }
+
+  // Default: use the standard 10 derived parameters and fill values from current direct vessel
+  // (so switching Direct->Inverse preserves the current design as targets by default).
+  try { calculateVessel(); } catch(e) {}
+
+  const defaults = ['h','h_S','d_T','d_S','d_F','d_G','d_L','V_SF','V','P'];
+  for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+    const key = defaults[i] || '';
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const val = document.getElementById(`inv_val_${i}`);
+    const fix = document.getElementById(`inv_fix_${i}`);
+    if (sel) sel.value = key;
+    updateInverseRowRange(i);
+    if (val && key && currentParams && currentParams[key] !== undefined) {
+      val.value = currentParams[key];
+      syncInverseSliderFromValue(i);
+    }
+    if (fix) { fix.checked = false; setInverseRowDisabled(i, false); }
+  }
+  inverseStateInitialized = true;
+  saveInverseStateNow();
+}
+
+
+// Copy current DIRECT input parameter set + values into INVERSE targets (10 rows).
+// This runs only when switching from Direct -> Inverse, unless called explicitly.
+function snapshotDirectToInverse() {
+  try {
+    // Ensure inverse UI exists
+    if (!inverseStateInitialized) {
+      try { ensureInverseStateInitialized(); } catch(e) {}
+    }
+    if (!Array.isArray(inputParams) || inputParams.length === 0) return;
+
+    // Direct list is exactly the input parameters (should be 10). Use the first 10 safely.
+    const keys = inputParams.map(p => p.key).slice(0, 10);
+
+    for (let i = 0; i < 10; i++) {
+      const key = keys[i] || '';
+      const sel = document.getElementById(`inv_sel_${i}`);
+      const val = document.getElementById(`inv_val_${i}`);
+      const fix = document.getElementById(`inv_fix_${i}`);
+
+      if (sel) sel.value = key;
+
+      // Pull current value from DIRECT panel input
+      let directVal = null;
+      if (key) {
+        const directInput = document.getElementById(`value_${key}`);
+        const v = directInput ? parseFloat(directInput.value) : NaN;
+        if (isFinite(v)) directVal = v;
+      }
+
+      // Update row range/unit and apply value
+      updateInverseRowRange(i);
+      if (val) {
+        if (directVal !== null) val.value = directVal;
+        // sync slider to value (works for both input/derived keys)
+        syncInverseSliderFromValue(i);
+      }
+
+      // By default, do NOT fix rows on snapshot
+      if (fix) { fix.checked = false; setInverseRowDisabled(i, false); }
+    }
+
+    inverseStateInitialized = true;
+    saveInverseStateNow();
+  } catch (e) {
+    // silent: snapshot should never block mode switch
+    console.warn('snapshotDirectToInverse failed:', e);
+  }
+}
 
 function setWorkMode(mode) {
   if (mode !== 'direct' && mode !== 'inverse') mode = 'direct';
+  const prevWorkMode = currentWorkMode;
   currentWorkMode = mode;
 
   const directBtn = document.getElementById('modeDirectBtn');
@@ -1022,6 +1181,17 @@ function setWorkMode(mode) {
       if (inverseListBlock.parentElement === inverseWrap) inverseWrap.removeChild(inverseListBlock);
     }
   }
+
+// Ensure inverse parameters are initialized, and on Direct->Inverse copy current direct inputs+values
+if (mode === 'inverse') {
+  try {
+    if (prevWorkMode === 'direct') {
+      snapshotDirectToInverse();
+    } else {
+      ensureInverseStateInitialized();
+    }
+  } catch(e) {}
+}
 
   // Основную нижнюю панель инверсной задачи скрываем всегда (лист переносится влево)
   const invSection = document.getElementById('inverseSection');
@@ -3589,12 +3759,14 @@ function updateInverseRowRange(i, preserveValue = null) {
 
       fix.addEventListener('change', () => {
         setInverseRowDisabled(i, fix.checked);
+        scheduleSaveInverseState();
         // Keep values; just lock UI. Auto-solve only if unlock + enabled.
         if (!fix.checked) scheduleInverseAutoSolve();
       });
 
       sel.addEventListener('change', () => {
         updateInverseRowRange(i);
+        scheduleSaveInverseState();
         if (!fix.checked) scheduleInverseAutoSolve();
       });
 
@@ -3607,6 +3779,7 @@ function updateInverseRowRange(i, preserveValue = null) {
       val.addEventListener('change', () => {
         if (fix.checked) return;
         syncInverseSliderFromValue(i);
+        scheduleSaveInverseState();
         scheduleInverseAutoSolve();
       });
 
@@ -3619,6 +3792,7 @@ function updateInverseRowRange(i, preserveValue = null) {
       slider.addEventListener('change', () => {
         if (fix.checked) return;
         syncInverseValueFromSlider(i);
+        scheduleSaveInverseState();
         scheduleInverseAutoSolve();
       });
 
@@ -4246,6 +4420,8 @@ function updateInverseRowRange(i, preserveValue = null) {
     }
 
     setInverseStatus('Random inverse problem generated (targets filled).');
+    inverseStateInitialized = true;
+    saveInverseStateNow();
   }
 
   function randomizeNonFixedInverseTargets() {
@@ -4273,6 +4449,8 @@ function updateInverseRowRange(i, preserveValue = null) {
       }
     }
     setInverseStatus('Non-fixed target values randomized (parameter selection preserved).');
+    inverseStateInitialized = true;
+    saveInverseStateNow();
   }
 
   function solveInverseTask(isAuto = false) {
