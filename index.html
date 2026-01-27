@@ -4169,38 +4169,67 @@ function updateInverseRowRange(i, preserveValue = null) {
     return out;
   }
 
-  function inverseObjective(state, targets) {
-    const p_real = realFromState(state);
-    // quick consistency checks (mirror readInputParams)
-    if (p_real.A <= 0 || p_real.B <= 0 || p_real.delta <= 0 || p_real.gamma <= 0) return 1e30;
-    if (p_real.phi_S < p_real.phi_F) return 1e25;
-    if (p_real.h_F < 0.1) return 1e25;
-
-    const res = computeVesselFromRealParams(p_real);
-    if (!res.ok) return 1e30;
-
-    let err = 0;
-    const params = res.params;
-
-    for (const k of Object.keys(targets)) {
-      const t = targets[k];
-      const v = params[k];
-      if (v === undefined || t === undefined) return 1e30;
-      const scale = Math.max(1e-9, Math.abs(t), Math.abs(v), 1);
-      const r = (v - t) / scale;
-      err += r * r;
+  
+function buildInverseTargetScales(targets) {
+  // Prefer physically meaningful scaling by known parameter ranges (min..max).
+  // Falls back to magnitude-based scaling if a range is unavailable.
+  const scales = {};
+  for (const k of Object.keys(targets)) {
+    const t = targets[k];
+    const r = getInverseRangeForKey(k);
+    let span = null;
+    if (r && isFinite(r.min) && isFinite(r.max)) {
+      span = Math.abs(r.max - r.min);
     }
-    return err;
+    if (!isFinite(span) || span <= 1e-12) {
+      // fallback: a "soft" scale that still reacts to percent-level mismatch
+      span = Math.max(1.0, Math.abs(t || 0));
+    }
+    // guard against too tiny scales
+    scales[k] = Math.max(span, 1e-9);
   }
+  return scales;
+}
 
-  class AdaptiveSA10D {
-    constructor(bounds) {
+function inverseObjectiveStats(state, targets, scales) {
+  const p_real = realFromState(state);
+  // quick consistency checks (mirror readInputParams)
+  if (p_real.A <= 0 || p_real.B <= 0 || p_real.delta <= 0 || p_real.gamma <= 0) return { err: 1e30, maxRel: 1e9 };
+  if (p_real.phi_S < p_real.phi_F) return { err: 1e25, maxRel: 1e9 };
+  if (p_real.h_F < 0.1) return { err: 1e25, maxRel: 1e9 };
+
+  const res = computeVesselFromRealParams(p_real);
+  if (!res.ok) return { err: 1e30, maxRel: 1e9 };
+
+  let err = 0;
+  let maxRel = 0;
+  const params = res.params;
+
+  for (const k of Object.keys(targets)) {
+    const t = targets[k];
+    const v = params[k];
+    if (v === undefined || t === undefined) return { err: 1e30, maxRel: 1e9 };
+    const scale = (scales && scales[k]) ? scales[k] : Math.max(1e-9, Math.abs(t), Math.abs(v), 1);
+    const r = (v - t) / scale;
+    const ar = Math.abs(r);
+    if (ar > maxRel) maxRel = ar;
+    err += r * r;
+  }
+  return { err, maxRel };
+}
+
+function inverseObjective(state, targets, scales) {
+  return inverseObjectiveStats(state, targets, scales).err;
+}
+
+class AdaptiveSA10D {
+    constructor(bounds, stepInitScale = 0.08) {
       this.bounds = bounds;
       this.dimKeys = Object.keys(bounds);
       this.step = {};
       this.dimKeys.forEach(k => {
         const b = bounds[k];
-        this.step[k] = (b.max - b.min) * 0.08; // initial proposal scale
+        this.step[k] = (b.max - b.min) * stepInitScale; // initial proposal scale
       });
     }
 
@@ -4291,37 +4320,75 @@ function updateInverseRowRange(i, preserveValue = null) {
     }
   }
 
-  function localRefine(state, objective, bounds) {
-    // simple coordinate refinement with shrinking step
-    let s = { ...state };
-    let e = objective(s);
-    const keys = Object.keys(bounds);
-    let stepScale = 0.15;
+  
+function localRefine(state, objective, bounds, opts = {}) {
+  // Coordinate refinement with shrinking step, extended to support "fine finishing".
+  // opts: { passes, stepScaleInit, stepScaleMin, shrink, candMults }
+  let s = { ...state };
+  let e = objective(s);
+  const keys = Object.keys(bounds);
 
-    for (let pass = 0; pass < 10; pass++) {
-      let improved = false;
-      for (const k of keys) {
-        const b = bounds[k];
-        const base = s[k];
-        const step = (b.max - b.min) * stepScale;
+  let stepScale = (opts.stepScaleInit !== undefined) ? opts.stepScaleInit : 0.12;
+  const stepScaleMin = (opts.stepScaleMin !== undefined) ? opts.stepScaleMin : 1e-6;
+  const shrink = (opts.shrink !== undefined) ? opts.shrink : 0.55;
+  const passes = (opts.passes !== undefined) ? opts.passes : 18;
+  const candMults = Array.isArray(opts.candMults) ? opts.candMults : [1.0, -1.0, 0.35, -0.35, 0.12, -0.12];
 
-        const candidates = [base - step, base + step, base - 0.5*step, base + 0.5*step];
-        for (const cv0 of candidates) {
-          const cv = Math.min(Math.max(cv0, b.min), b.max);
-          const cand = { ...s, [k]: cv };
-          const ce = objective(cand);
-          if (ce < e) {
-            s = cand;
-            e = ce;
-            improved = true;
-          }
+  for (let pass = 0; pass < passes; pass++) {
+    let improved = false;
+
+    for (const k of keys) {
+      const b = bounds[k];
+      const base = s[k];
+      const step = (b.max - b.min) * stepScale;
+
+      for (const m of candMults) {
+        const cv0 = base + m * step;
+        const cv = Math.min(Math.max(cv0, b.min), b.max);
+        if (cv === base) continue;
+        const cand = { ...s, [k]: cv };
+        const ce = objective(cand);
+        if (ce < e) {
+          s = cand;
+          e = ce;
+          improved = true;
         }
       }
-      if (!improved) stepScale *= 0.5;
-      if (stepScale < 1e-4) break;
     }
-    return { bestState: s, bestError: e };
+
+    if (!improved) stepScale *= shrink;
+    if (stepScale < stepScaleMin) break;
   }
+  return { bestState: s, bestError: e };
+}
+
+function localRefine2Phase(state, objective, bounds) {
+  // Phase A: coarse
+  const a = localRefine(state, objective, bounds, {
+    passes: 26,
+    stepScaleInit: 0.12,
+    stepScaleMin: 2e-5,
+    shrink: 0.6,
+    candMults: [1.0, -1.0, 0.35, -0.35, 0.12, -0.12]
+  });
+  // Phase B: fine finishing
+  const b = localRefine(a.bestState, objective, bounds, {
+    passes: 55,
+    stepScaleInit: 0.02,
+    stepScaleMin: 3e-9,
+    shrink: 0.65,
+    candMults: [1.0, -1.0, 0.25, -0.25, 0.08, -0.08, 0.03, -0.03]
+  });
+  // Phase C: ultra-fine micro steps (cheap but improves last 0.1–0.5%)
+  const c = localRefine(b.bestState, objective, bounds, {
+    passes: 60,
+    stepScaleInit: 0.006,
+    stepScaleMin: 8e-11,
+    shrink: 0.70,
+    candMults: [1.0, -1.0, 0.22, -0.22, 0.07, -0.07, 0.025, -0.025, 0.01, -0.01]
+  });
+  return c;
+}
 
   function getInverseBoundsForCurrentMode() {
     const mode = ontologyRanges[currentOntologyMode] ? currentOntologyMode : 'all';
@@ -4452,52 +4519,106 @@ function updateInverseRowRange(i, preserveValue = null) {
     saveInverseStateNow();
   }
 
-  function solveInverseTask(isAuto = false) {
-    const { targets, issues } = getInverseTargets();
-    if (issues.length) {
-      setInverseStatus(issues.join(' | '), true);
-      return;
-    }
-
-    setInverseStatus('Solving inverse task...');
-
-    const bounds = getInverseBoundsForCurrentMode();
-
-    // initial guess: from current UI if available, else random
-    let initReal = {};
-    try {
-      const rr = readInputParams();
-      initReal = rr.errors.length ? sampleRandomRealParamsForMode(currentOntologyMode) : rr.params;
-    } catch (_) {
-      initReal = sampleRandomRealParamsForMode(currentOntologyMode);
-    }
-
-    let initState = buildStateFromReal(initReal);
-    initState = clampToBounds(initState, bounds);
-
-    const obj = (s) => inverseObjective(s, targets);
-
-    const sa = new AdaptiveSA10D(bounds);
-    const saRes = sa.optimize(initState, obj, {
-      maxIter: isAuto ? 6000 : 32000,
-      t0: 1.0,
-      cooling: isAuto ? 0.9991 : 0.99935,
-      stallLimit: isAuto ? 1200 : 5000,
-      targetErr: isAuto ? 1e-8 : 1e-10
-    });
-
-    const locRes = localRefine(saRes.bestState, obj, bounds);
-
-    const best = locRes.bestState;
-    const bestErr = locRes.bestError;
-
-    // Apply solution to UI
-    applyInverseSolutionToUI(best);
-
-    // Report quality
-    const rms = Math.sqrt(bestErr / INVERSE_TARGET_COUNT);
-    setInverseStatus(`Inverse solved. RMS relative error ≈ ${(rms*100).toFixed(4)}% (lower is better).`);
+  
+function solveInverseTask(isAuto = false) {
+  const { targets, issues } = getInverseTargets();
+  if (issues.length) {
+    setInverseStatus(issues.join(' | '), true);
+    return;
   }
+
+  setInverseStatus('Solving inverse task...');
+
+  const bounds = getInverseBoundsForCurrentMode();
+  const scales = buildInverseTargetScales(targets);
+
+  const obj = (s) => inverseObjective(s, targets, scales);
+
+  // initial guess: from current UI if available, else random
+  let initReal = {};
+  try {
+    const rr = readInputParams();
+    initReal = rr.errors.length ? sampleRandomRealParamsForMode(currentOntologyMode) : rr.params;
+  } catch (_) {
+    initReal = sampleRandomRealParamsForMode(currentOntologyMode);
+  }
+
+  let baseInit = buildStateFromReal(initReal);
+  baseInit = clampToBounds(baseInit, bounds);
+
+  // --- Multi-start (cheap insurance against local minima in 10D) ---
+  const nStarts = isAuto ? 2 : 14;
+  const starts = [];
+  starts.push(baseInit);
+
+  // jittered around base
+  for (let i = 0; i < Math.max(0, nStarts - 3); i++) {
+    const s = { ...baseInit };
+    for (const k of Object.keys(bounds)) {
+      const b = bounds[k];
+      const span = (b.max - b.min);
+      const j = (Math.random() * 2 - 1) * 0.06 * span; // 6% span jitter
+      s[k] = Math.min(Math.max(s[k] + j, b.min), b.max);
+    }
+    starts.push(s);
+  }
+
+  // fully random starts
+  for (let i = 0; i < (isAuto ? 1 : 4); i++) {
+    const rr = sampleRandomRealParamsForMode(currentOntologyMode);
+    let s = clampToBounds(buildStateFromReal(rr), bounds);
+    starts.push(s);
+  }
+
+  let bestS = null;
+  let bestE = Infinity;
+
+  const coarseMaxIter = isAuto ? 4500 : 20000;
+
+  for (let si = 0; si < Math.min(starts.length, nStarts); si++) {
+    const sa1 = new AdaptiveSA10D(bounds, 0.10);
+    const r1 = sa1.optimize(starts[si], obj, {
+      maxIter: coarseMaxIter,
+      t0: isAuto ? 1.1 : 1.7,
+      cooling: isAuto ? 0.9990 : 0.99918,
+      stallLimit: isAuto ? 900 : 2600,
+      targetErr: isAuto ? 1e-9 : 1e-11
+    });
+    if (r1.bestError < bestE) {
+      bestE = r1.bestError;
+      bestS = r1.bestState;
+    }
+  }
+
+  // --- SA stage 2: fine anneal around best ---
+  const sa2 = new AdaptiveSA10D(bounds, 0.03);
+  const r2 = sa2.optimize(bestS, obj, {
+    maxIter: isAuto ? 6500 : 45000,
+    t0: isAuto ? 0.45 : 0.28,
+    cooling: isAuto ? 0.9995 : 0.99975,
+    stallLimit: isAuto ? 1600 : 9000,
+    targetErr: isAuto ? 1e-10 : 1e-12
+  });
+
+  // --- Local finishing ---
+  const locRes = localRefine2Phase(r2.bestState, obj, bounds);
+
+  bestS = locRes.bestState;
+  bestE = locRes.bestError;
+
+  // Apply solution to UI
+  applyInverseSolutionToUI(bestS);
+
+  // Report quality
+  const stats = inverseObjectiveStats(bestS, targets, scales);
+  const rms = Math.sqrt(stats.err / INVERSE_TARGET_COUNT);
+  const maxRel = stats.maxRel;
+
+  setInverseStatus(
+    `Inverse solved. RMS ≈ ${(rms*100).toFixed(4)}%, Max ≈ ${(maxRel*100).toFixed(4)}% (range-scaled).`
+  );
+}
+
 
   // ========== ИНИЦИАЛИЗАЦИЯ ==========
   function init() {
