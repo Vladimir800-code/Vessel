@@ -4520,6 +4520,53 @@ function localRefine2Phase(state, objective, bounds) {
   }
 
   
+
+function canonicalRootScore(state, bounds) {
+  // Smaller score => more "central" solution in normalized [min..max] box.
+  let s = 0;
+  for (const k of Object.keys(bounds)) {
+    const b = bounds[k];
+    const span = (b.max - b.min) || 1;
+    const mid = 0.5 * (b.max + b.min);
+    const z = (state[k] - mid) / span;
+    s += z * z;
+  }
+  return s;
+}
+
+function selectCanonicalCandidate(candidates, bounds, bestErr, isAuto) {
+  // Select a single representative ("canonical root") among near-equivalent minima.
+  // 1) Filter by error closeness to bestErr
+  // 2) Choose the most central solution (minimum canonicalRootScore)
+  const relTol = isAuto ? 0.06 : 0.03; // allow small band of near-best minima
+  const absTol = isAuto ? 1e-10 : 1e-12;
+  const thr = bestErr * (1 + relTol) + absTol;
+
+  const filtered = [];
+  for (const c of candidates) {
+    if (c && isFinite(c.err) && c.err <= thr && c.state) filtered.push(c);
+  }
+  if (!filtered.length) {
+    return { chosen: null, filteredCount: 0, thr };
+  }
+
+  let best = filtered[0];
+  best.score = canonicalRootScore(best.state, bounds);
+
+  for (let i = 1; i < filtered.length; i++) {
+    const c = filtered[i];
+    const score = canonicalRootScore(c.state, bounds);
+    c.score = score;
+
+    // Primary: score (canonical), Secondary: err
+    if (score < best.score - 1e-15 || (Math.abs(score - best.score) <= 1e-15 && c.err < best.err)) {
+      best = c;
+    }
+  }
+  return { chosen: best, filteredCount: filtered.length, thr };
+}
+
+
 function solveInverseTask(isAuto = false) {
   const { targets, issues } = getInverseTargets();
   if (issues.length) {
@@ -4531,7 +4578,6 @@ function solveInverseTask(isAuto = false) {
 
   const bounds = getInverseBoundsForCurrentMode();
   const scales = buildInverseTargetScales(targets);
-
   const obj = (s) => inverseObjective(s, targets, scales);
 
   // initial guess: from current UI if available, else random
@@ -4570,12 +4616,13 @@ function solveInverseTask(isAuto = false) {
     starts.push(s);
   }
 
-  let bestS = null;
+  // === SA stage 1 across starts ===
   let bestE = Infinity;
-
+  const candidates = [];
   const coarseMaxIter = isAuto ? 4500 : 20000;
 
-  for (let si = 0; si < Math.min(starts.length, nStarts); si++) {
+  const usedStarts = Math.min(starts.length, nStarts);
+  for (let si = 0; si < usedStarts; si++) {
     const sa1 = new AdaptiveSA10D(bounds, 0.10);
     const r1 = sa1.optimize(starts[si], obj, {
       maxIter: coarseMaxIter,
@@ -4584,15 +4631,18 @@ function solveInverseTask(isAuto = false) {
       stallLimit: isAuto ? 900 : 2600,
       targetErr: isAuto ? 1e-9 : 1e-11
     });
-    if (r1.bestError < bestE) {
-      bestE = r1.bestError;
-      bestS = r1.bestState;
-    }
+
+    candidates.push({ state: r1.bestState, err: r1.bestError, startIndex: si });
+    if (r1.bestError < bestE) bestE = r1.bestError;
   }
 
-  // --- SA stage 2: fine anneal around best ---
+  // === Canonical root selection among near-equivalent minima ===
+  const canon = selectCanonicalCandidate(candidates, bounds, bestE, isAuto);
+  let chosenS = (canon.chosen && canon.chosen.state) ? canon.chosen.state : candidates[0].state;
+
+  // --- SA stage 2: fine anneal around canonical solution ---
   const sa2 = new AdaptiveSA10D(bounds, 0.03);
-  const r2 = sa2.optimize(bestS, obj, {
+  const r2 = sa2.optimize(chosenS, obj, {
     maxIter: isAuto ? 6500 : 45000,
     t0: isAuto ? 0.45 : 0.28,
     cooling: isAuto ? 0.9995 : 0.99975,
@@ -4603,8 +4653,7 @@ function solveInverseTask(isAuto = false) {
   // --- Local finishing ---
   const locRes = localRefine2Phase(r2.bestState, obj, bounds);
 
-  bestS = locRes.bestState;
-  bestE = locRes.bestError;
+  const bestS = locRes.bestState;
 
   // Apply solution to UI
   applyInverseSolutionToUI(bestS);
@@ -4614,10 +4663,17 @@ function solveInverseTask(isAuto = false) {
   const rms = Math.sqrt(stats.err / INVERSE_TARGET_COUNT);
   const maxRel = stats.maxRel;
 
+  const canonMsg = (canon && canon.chosen)
+    ? `Выбран канонический корень (1 из ${canon.filteredCount} кандидатов при err≤${canon.thr.toExponential(2)}).`
+    : `Выбор канонического корня: fallback.`;
+
   setInverseStatus(
-    `Inverse solved. RMS ≈ ${(rms*100).toFixed(4)}%, Max ≈ ${(maxRel*100).toFixed(4)}% (range-scaled).`
+    `Inverse solved. RMS ≈ ${(rms*100).toFixed(4)}%, Max ≈ ${(maxRel*100).toFixed(4)}% (range-scaled). ` +
+    `${canonMsg} Примечание: решение выбрано как один из возможных корней.`
   );
 }
+
+
 
 
   // ========== ИНИЦИАЛИЗАЦИЯ ==========
