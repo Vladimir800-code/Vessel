@@ -1173,7 +1173,7 @@ function setWorkMode(mode) {
       Array.from(inverseWrap.childNodes).forEach(n => { if (n !== inverseListBlock) inverseWrap.removeChild(n); });
       if (inverseListBlock.parentElement !== inverseWrap) inverseWrap.appendChild(inverseListBlock);
     } else {
-      // возвращаем блок обратно вниз (в его родной контейнер)
+      // возвращаем блок обратно внof (в его родной контейнер)
       if (inverseListBlock.parentElement !== inverseListHomeParent) inverseListHomeParent.appendChild(inverseListBlock);
       // и гарантируем, что inverseWrap пуст (чтобы ничего не "добавлялось")
       Array.from(inverseWrap.childNodes).forEach(n => { if (n !== inverseListBlock) inverseWrap.removeChild(n); });
@@ -1339,7 +1339,7 @@ if (mode === 'inverse') {
       if (key === 'A') {
         normalized[key] = 1.0; // Нормируем A к 1
       } else if (['phi_S', 'phi_F', 'alpha_S', 'alpha_F', 'delta', 'gamma'].includes(key)) {
-        // Углы и безразмерные параметры остаются без изменений
+        // Углы и безразмерные параметры остаются без ofменений
         normalized[key] = realParams[key];
       } else {
         // Линейные параметры нормируем относительно A
@@ -1438,7 +1438,7 @@ if (mode === 'inverse') {
       }
     });
     
-    // Обновляем delta и gamma напрямую из онтологии (без нормирования)
+    // Обновляем delta и gamma напрямую of онтологии (без нормирования)
     ['delta', 'gamma'].forEach(paramId => {
       if (isParamFixed(paramId)) { return; }
       const paramDef = inputParams.find(p => p.key === paramId);
@@ -1448,7 +1448,7 @@ if (mode === 'inverse') {
       const range = ontologyRanges[baseMode].ranges[paramId];
       if (!range) return;
       
-      // Устанавливаем значения напрямую из онтологии
+      // Устанавливаем значения напрямую of онтологии
       paramDef.min = range.min;
       paramDef.max = range.max;
       paramDef.step = range.step;
@@ -1533,7 +1533,7 @@ if (mode === 'inverse') {
       }
     });
     
-    // delta и gamma остаются без изменений
+    // delta и gamma остаются без ofменений
     
     showStatus(`Scale factor A установлен: ${A_real}`, 'info');
     
@@ -1676,13 +1676,13 @@ if (mode === 'inverse') {
       const alphaSRandomStep = Math.floor(Math.random() * (alphaSSteps + 1));
       params_norm.alpha_S = alphaSRange.min + alphaSRandomStep * alphaSRange.step;
       
-      // 2.4. δ (толщина стенки) - берется напрямую из онтологии
+      // 2.4. δ (толщина стенки) - берется напрямую of онтологии
       const deltaRange = ontology.ranges['delta'];
       const deltaSteps = Math.floor((deltaRange.max - deltaRange.min) / deltaRange.step);
       const deltaRandomStep = Math.floor(Math.random() * (deltaSteps + 1));
       params_norm.delta = deltaRange.min + deltaRandomStep * deltaRange.step;
       
-      // 2.5. γ (удельный вес материала) - берется напрямую из онтологии
+      // 2.5. γ (удельный вес материала) - берется напрямую of онтологии
       const gammaRange = ontology.ranges['gamma'];
       const gammaSteps = Math.floor((gammaRange.max - gammaRange.min) / gammaRange.step);
       const gammaRandomStep = Math.floor(Math.random() * (gammaSteps + 1));
@@ -1869,7 +1869,7 @@ if (mode === 'inverse') {
       if (p.key === 'A') {
         initial = 22;
       } else if (p.key === 'delta') {
-        // Берем значение из онтологии (диапазон 0.1-1.0 с шагом 0.1)
+        // Берем значение of онтологии (диапазон 0.1-1.0 с шагом 0.1)
         const deltaRange = ontologyRanges.all.ranges['delta'];
         initial = deltaRange.min + Math.floor(Math.random() * ((deltaRange.max - deltaRange.min) / deltaRange.step + 1)) * deltaRange.step;
       } else if (p.key === 'gamma') {
@@ -2551,7 +2551,7 @@ if (mode === 'inverse') {
         // Устанавливаем значения по умолчанию
         let defaultValue;
         if (def.key === 'delta') {
-          // Берем из онтологии
+          // Берем of онтологии
           const currentMode = document.getElementById('ontologySelect').value;
           const deltaRange = ontologyRanges[currentMode].ranges['delta'];
           defaultValue = deltaRange.min;
@@ -3241,11 +3241,11 @@ if (mode === 'inverse') {
         if (hasChanges) {
             saveBtn.style.display = 'inline-block';
             saveBtn.style.background = '#2ecc71';
-            saveBtn.title = 'Сохранить все изменения';
+            saveBtn.title = 'Сохранить все ofменения';
             saveBtn.textContent = '💾 Save all';
         } else {
             saveBtn.style.display = 'none';
-            saveBtn.title = 'Нет изменений для сохранения';
+            saveBtn.title = 'Нет ofменений для сохранения';
         }
     }
   }
@@ -3260,19 +3260,19 @@ if (mode === 'inverse') {
         ontologyChanges = {};
         updateSaveButtonVisibility();
         
-        showStatus('Все изменения сохранены успешно!', 'success');
+        showStatus('Все ofменения сохранены успешно!', 'success');
         
         setTimeout(() => {
             hideOntologyEditor();
         }, 1000);
         
     } catch (e) {
-        showStatus('Error при сохранении изменений: ' + e.message, 'error');
+        showStatus('Error при сохранении ofменений: ' + e.message, 'error');
     }
   }
 
   function resetOntologyToDefaults() {
-    if (confirm('Вы действительно хотите сбросить все изменения и вернуться к настройкам по умолчанию?')) {
+    if (confirm('Вы действительно хотите сбросить все ofменения и вернуться к настройкам по умолчанию?')) {
         ontologyChanges = {};
         
         ontologyRanges = {
@@ -4664,12 +4664,12 @@ function solveInverseTask(isAuto = false) {
   const maxRel = stats.maxRel;
 
   const canonMsg = (canon && canon.chosen)
-    ? `Выбран канонический корень (1 из ${canon.filteredCount} кандидатов при err≤${canon.thr.toExponential(2)}).`
+    ? `Canonical root selected (1 of ${canon.filteredCount} candidates with err≤${canon.thr.toExponential(2)}).`
     : `Выбор канонического корня: fallback.`;
 
   setInverseStatus(
     `Inverse solved. RMS ≈ ${(rms*100).toFixed(4)}%, Max ≈ ${(maxRel*100).toFixed(4)}% (range-scaled). ` +
-    `${canonMsg} Примечание: решение выбрано как один из возможных корней.`
+    `${canonMsg} Note: the solution is selected as one of the possible roots.`
   );
 }
 
@@ -4743,7 +4743,7 @@ init3DCanvas();
         generateRandomProblem();
     }, 500);
     
-    // Инициализация переключателя сообщений после создания DOM
+    // Инициалofация переключателя сообщений после создания DOM
     const globalToggle = document.getElementById('globalMessagesToggle');
     if (globalToggle) {
         const checkbox = globalToggle.querySelector('input');
