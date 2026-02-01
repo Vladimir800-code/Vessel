@@ -1016,6 +1016,40 @@ function applyInverseStateToUI(state) {
   }
 }
 
+
+function syncInversePanelValuesToCurrentParams(options = {}) {
+  // Consistency invariant:
+  // After an inverse solve (or when explicitly requested), make the Inverse Task values reflect the *current achieved* vessel
+  // so the left "Inverse Task" panel and the "All parameters" table are synchronized.
+  const { onlyIfValueIsNumeric = true, overwriteFixed = true } = options;
+  if (!currentParams) return;
+
+  for (let i = 0; i < INVERSE_TARGET_COUNT; i++) {
+    const sel = document.getElementById(`inv_sel_${i}`);
+    const val = document.getElementById(`inv_val_${i}`);
+    const fix = document.getElementById(`inv_fix_${i}`);
+    if (!sel || !val) continue;
+
+    const key = (sel.value || '').trim();
+    if (!key) continue;
+
+    const isFixed = fix ? !!fix.checked : false;
+    if (!overwriteFixed && isFixed) continue;
+
+    const achieved = currentParams[key];
+    if (onlyIfValueIsNumeric && (typeof achieved !== 'number' || !isFinite(achieved))) continue;
+
+    val.value = achieved;
+
+    updateInverseRowRange(i, achieved);
+    syncInverseSliderFromValue(i);
+  }
+
+  // Persist the synchronized state so re-opening the file keeps the achieved view.
+  try { saveInverseStateNow(); } catch(e) {}
+}
+
+
 function saveInverseStateNow() {
   try {
     localStorage.setItem('vessel_inverse_state_v1', JSON.stringify(getInverseStateFromUI()));
@@ -4658,6 +4692,8 @@ function solveInverseTask(isAuto = false) {
   // Apply solution to UI
   applyInverseSolutionToUI(bestS);
 
+    // Enforce consistency invariant between Inverse Task panel and All parameters table
+    try { syncInversePanelValuesToCurrentParams({ overwriteFixed: true }); } catch(e) { console.warn('syncInversePanelValuesToCurrentParams failed:', e); }
   // Report quality
   const stats = inverseObjectiveStats(bestS, targets, scales);
   const rms = Math.sqrt(stats.err / INVERSE_TARGET_COUNT);
